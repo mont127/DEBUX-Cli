@@ -14,7 +14,7 @@ import sys
 import textwrap
 import time
 
-from . import backends, protocol, tools
+from . import backends, protocol, reader, tools
 
 HOME = os.path.expanduser("~/.debux")
 CONF = os.path.join(HOME, "config.json")
@@ -78,12 +78,13 @@ HELP = [
 
 
 class Session:
-    def __init__(self, backend, system, transcript=None, no_search=False):
+    def __init__(self, backend, system, transcript=None, no_search=False, auto_tools=True):
         self.backend = backend
         self.system = system
         self.messages = [{"role": "system", "content": system}]
         self.transcript = transcript
         self.no_search = no_search
+        self.auto_tools = auto_tools
         self.local = backend          # restored by /connect disconnect
         self.log = []
 
@@ -104,9 +105,19 @@ class Session:
 
     def ask(self):
         print(f"\n{C.d}--- debux ---{C.r}")
+        # A 27B model takes the better part of a minute to answer. Without a marker the silence
+        # is indistinguishable from a hang, which is what it gets reported as.
+        state = {"first": True}
+
+        def emit(tok):
+            if state["first"]:
+                sys.stdout.write("\r" + " " * 30 + "\r")
+                state["first"] = False
+            sys.stdout.write(tok); sys.stdout.flush()
+
+        sys.stdout.write(f"{C.d}thinking...{C.r}"); sys.stdout.flush()
         try:
-            reply = self.backend.chat(protocol.windowed(self.messages),
-                                      on_token=lambda t: (sys.stdout.write(t), sys.stdout.flush()))
+            reply = self.backend.chat(protocol.windowed(self.messages), on_token=emit)
         except backends.BackendError as e:
             print(f"\n{C.rd}{e}{C.r}")
             return None
@@ -123,21 +134,8 @@ class Session:
 
     @staticmethod
     def block(prompt):
-        """Read pasted output. Terminated by a lone '.', because real output has blank lines."""
-        print(prompt)
-        lines = []
-        while True:
-            try:
-                line = input()
-            except EOFError:
-                break
-            except KeyboardInterrupt:
-                print(f"{C.d}(cancelled){C.r}")
-                return ""
-            if line.strip() == ".":
-                break
-            lines.append(line)
-        return "\n".join(lines).strip()
+        """Read pasted output. A paste submits itself; typed input ends with '.' or Ctrl-D."""
+        return reader.read_block(prompt)
 
     # ---------------------------------------------------------------- commands
 
@@ -284,8 +282,63 @@ class Session:
 
     # ---------------------------------------------------------------- the loop
 
+    def auto_fetch(self, url):
+        print(f"\n{C.ma}fetching:{C.r} {url}")
+        try:
+            body = tools.fetch(url)
+        except tools.FetchError as e:
+            print(f"{C.rd}{e}{C.r}")
+            self.say(f"Fetching {url} failed: {e}. Continue without it, or say what you need.")
+            return
+        print(f"{C.d}{wrap(body[:400])}{C.r}\n{C.d}  ({len(body)} chars added){C.r}")
+        self.say(f"Contents of {url}:\n\n{body}")
+
+    def maybe_assist(self, reply):
+        """Run a lookup the model needed but did not ask for.
+
+        It emits SEARCH very rarely, so waiting for the directive means the tool never fires. When
+        the text says outright that something depends on a version or vendor fact, searching for it
+        is the useful move - and better than letting it guess, which is the failure this whole
+        model is built against.
+        """
+        if self.no_search:
+            return False
+        found = protocol.urls(reply)
+        if found:
+            self.auto_fetch(found[0])
+            return True
+        if not protocol.sounds_unsure(reply):
+            return False
+        query = self.assist_query(reply)
+        if not query:
+            return False
+        print(f"\n{C.ma}it flagged an unknown - searching:{C.r} {query}")
+        res = tools.search(query)
+        print(f"{C.d}{wrap(res)}{C.r}")
+        self.say(f"You said this depends on something you should not invent, so here are search "
+                 f"results for '{query}':\n\n{res}\n\nUse them only if they settle it; if they "
+                 f"do not, say so.")
+        return True
+
+    def assist_query(self, reply):
+        """Build a query from the problem and the reply's own nouns - versions, packages, errors."""
+        import re
+        first = next((m["content"] for m in self.messages if m["role"] == "user"), "")
+        bits = re.findall(r"[A-Za-z][\w.+-]*\d[\w.+-]*|\b[a-z][a-z0-9_-]{3,}\b", reply)
+        seen, keep = set(), []
+        for b in bits:
+            bl = b.lower()
+            if bl in seen or bl in ("depends", "version", "release", "documentation", "should",
+                                    "which", "would", "there", "their", "because", "confirm"):
+                continue
+            seen.add(bl); keep.append(b)
+            if len(keep) >= 8:
+                break
+        return " ".join(first.split()[:10] + keep[:8]).strip()
+
     def turn(self):
         """Drive one exchange, following directives until the model needs the user again."""
+        budget = 2   # cap on unrequested tool calls per turn, so it cannot loop on itself
         while True:
             got = self.ask()
             if not got:
@@ -313,7 +366,16 @@ class Session:
                          "inferring an answer they do not support.")
                 continue
 
-            if kind in ("DIAGNOSIS", "INSUFFICIENT"):
+            if kind == "FETCH":
+                target = block.split(":", 1)[1].strip().splitlines()[0].strip()
+                self.auto_fetch(target)
+                continue
+
+            if kind in ("DIAGNOSIS", "INSUFFICIENT", "PROCEDURE"):
+                # Even when it commits, it may have leaned on something it should have looked up.
+                if self.auto_tools and budget > 0 and self.maybe_assist(reply):
+                    budget -= 1
+                    continue
                 return
 
             cmds = protocol.commands(block)
@@ -343,6 +405,8 @@ def main(argv=None):
     ap.add_argument("--system", default=None, help="path to a system prompt")
     ap.add_argument("--transcript", default=None, help="append the session to this jsonl file")
     ap.add_argument("--no-search", action="store_true")
+    ap.add_argument("--no-auto-tools", action="store_true",
+                    help="only search or fetch when the model explicitly asks")
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("problem", nargs="*", help="the problem, stated on the command line")
     a = ap.parse_args(argv)
@@ -356,7 +420,8 @@ def main(argv=None):
         print(f"cannot read system prompt: {e}", file=sys.stderr)
         return 1
 
-    s = Session(build_backend(a, conf), system, a.transcript, a.no_search)
+    s = Session(build_backend(a, conf), system, a.transcript, a.no_search,
+                auto_tools=not a.no_auto_tools)
 
     print(f"{C.b}Debux{C.r}  {C.d}{s.backend.describe()}{C.r}")
     print(f"{C.d}Describe the problem. Paste command output when asked, ending with a lone '.'.")

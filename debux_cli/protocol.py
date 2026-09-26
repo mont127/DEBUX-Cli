@@ -9,7 +9,30 @@ import re
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DIRECTIVE = re.compile(r"^[ \t]*(NEED|SEARCH|DIAGNOSIS|INSUFFICIENT)[ \t]*:(.*)$", re.M | re.S)
+DIRECTIVE = re.compile(
+    r"^[ \t]*(NEED|SEARCH|FETCH|DIAGNOSIS|PROCEDURE|INSUFFICIENT)[ \t]*:(.*)$", re.M | re.S)
+
+URL = re.compile(r"https?://[^\s`'\"<>)\]]+")
+
+# The model rarely asks to search on its own (measured 0/10 on the benchmark), but it does say
+# plainly when it is out of its depth. These are the phrasings that mean "this depends on a
+# version or vendor fact I do not have", which is exactly when a lookup helps.
+UNSURE = re.compile(
+    r"\b(?:I (?:do not|don't) know|not (?:certain|sure) (?:which|what|whether)"
+    r"|depends on the (?:exact )?(?:version|release|distribution|vendor|provider)"
+    r"|varies by (?:version|distribution|vendor|provider)"
+    r"|consult (?:the )?(?:official )?(?:documentation|docs|release notes|vendor)"
+    r"|check (?:the )?(?:official )?(?:documentation|docs|release notes|changelog)"
+    r"|would need to (?:look ?up|verify|confirm) (?:the )?(?:exact|current|specific)"
+    r"|I (?:will|won't|will not) invent)\b", re.I)
+
+
+def urls(text):
+    return URL.findall(text or "")
+
+
+def sounds_unsure(text):
+    return bool(UNSURE.search(text or ""))
 
 # Must match the corpus builder's --window. The model was trained on the system prompt, the
 # original symptom, and the last message only. A full transcript is a context shape it has never
@@ -56,8 +79,22 @@ def commands(block, limit=6):
             continue
         line = re.sub(r"^[-*•]\s*", "", line)
         line = re.sub(r"^\d+[.)]\s*", "", line)
-        line = re.sub(r"^[$#]\s*", "", line)
-        line = line.strip("`").strip()
+        # ```bash opens a fence; the language tag is not a command
+        if line.startswith("```"):
+            continue
+        if line.startswith("#"):
+            continue
+        line = re.sub(r"^\$\s*", "", line)
+        # The model often writes: 1. `cmd --flag` (why this command matters).
+        # Prefer whatever is inside backticks; otherwise cut at the first " (" or " to ".
+        m = re.search(r"`([^`]+)`", line)
+        if m:
+            line = m.group(1).strip()
+        else:
+            line = line.strip("`").strip()
+            line = re.split(r"\s+\((?:or|and|to|adjust|replace|check|test|see)\b|\s+(?:to|which|so that)\s+(?:identify|see|confirm|check|test)\b",
+                            line)[0].strip()
+        line = line.rstrip("`").strip().rstrip(".")
         if not line or line.endswith(":"):
             continue
         # a sentence rather than a command
