@@ -64,3 +64,35 @@ def _read_piped(lines=None):
 def _now():
     import time
     return time.monotonic()
+
+
+def read_line_or_paste(prompt):
+    """Read one typed line, or the whole thing if the user pasted several.
+
+    People paste the problem and the command output together at the first prompt. A plain
+    input() takes the first line only and the rest leaks into the next read, so the model is
+    asked to diagnose a symptom with its evidence torn off. Read the first line, then take
+    anything that is already waiting behind it.
+    """
+    try:
+        first = input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        raise
+    if not sys.stdin.isatty():
+        return first
+    lines = [first]
+    while True:
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], BURST_GAP)
+        except (OSError, ValueError):
+            break
+        if not ready:
+            break
+        line = sys.stdin.readline()
+        if line == "":
+            break
+        line = line.rstrip("\n")
+        if line.strip() == ".":
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()

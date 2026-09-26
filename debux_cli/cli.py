@@ -433,7 +433,7 @@ def main(argv=None):
             line, first = first, ""
         else:
             try:
-                line = input(f"{C.cy}problem>{C.r} ").strip()
+                line = reader.read_line_or_paste(f"{C.cy}problem>{C.r} ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
