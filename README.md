@@ -26,6 +26,15 @@ It talks to Ollama by default. For a local MLX or llama.cpp server, or a remote 
 ./debux "nginx is returning 502 since this morning"
 ```
 
+Paste freely. A paste arrives as a burst of lines and is submitted once the burst goes quiet, so
+there is nothing to remember - including at the first prompt, where people naturally paste the
+problem and the command output together. Typed input ends with a lone `.` or Ctrl-D, so pausing
+mid-sentence never cuts you off.
+
+`--no-search` keeps the session entirely offline. `--no-auto-tools` stops the client searching or
+fetching unless the model explicitly asks. A reply takes most of a minute on a 27B model, so a
+`thinking...` marker shows while it works.
+
 ## How a session goes
 
 ```
@@ -41,10 +50,9 @@ NEED:
 run these and paste what they print:
   $ df -i /
 
-paste the output, end with a lone '.':
+paste the output:
 Filesystem      Inodes   IUsed  IFree IUse% Mounted on
 /dev/sda1      2621440 2621440      0  100% /
-.
 ```
 
 Every reply is reasoning followed by exactly one directive, and the CLI acts on it:
@@ -54,6 +62,8 @@ Every reply is reasoning followed by exactly one directive, and the CLI acts on 
 | `NEED` | lists the commands, waits for you to paste the output |
 | `DIAGNOSIS` | prints the cause and the fix, and hands the prompt back |
 | `SEARCH` | runs the search, feeds the results back, continues |
+| `FETCH` | fetches the page and feeds it back |
+| `PROCEDURE` | prints ordered steps, the irreversible one, and how to verify |
 | `INSUFFICIENT` | prints what is missing and what would settle it |
 
 `NEED` and `INSUFFICIENT` are the distinction that matters. `NEED` means the answer is on the
@@ -71,14 +81,29 @@ outage.
 | `/connect disconnect` | go back to the local backend |
 | `/search <query>` | search the web yourself and add the results |
 | `/fetch <url>` | fetch a page and add it as evidence |
-| `/upload <path>` | add a file - a log, a unit file, a config |
 | `/paste` | paste output without being asked |
+| `/upload <path>` | add a file - a log, a unit file, a config |
 | `/model <name>` | switch model |
 | `/reset` | start a new problem |
 | `/save [path]` | write the transcript to markdown |
 
 `/upload` tails long files, so pointing it at a 200 MB log gives the model the end of it, which is
 where the failure usually is. Binary files are refused rather than fed in as noise.
+
+## It reaches for tools on its own
+
+The slash commands are there when you want them, but you should rarely need them.
+
+- a URL the model mentions is fetched automatically, and it can ask for one itself with `FETCH:`
+- when a reply says outright that something "depends on the exact version" or "I will not invent
+  that", the client runs the lookup rather than letting it guess
+- at most two unrequested tool calls per turn, so it cannot loop on itself
+- `--no-auto-tools` returns to acting only on an explicit directive
+
+Being straight about what this is: the model emits `SEARCH` on its own very rarely - 0 out of 10
+on the benchmark - so waiting for the directive meant the tool never fired. The uncertainty
+detection is a heuristic over the model's own wording, not real tool-calling. It is a workaround
+for a gap in the model, and the proper fix is a model that asks.
 
 ### /connect
 
