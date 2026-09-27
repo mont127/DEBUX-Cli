@@ -19,12 +19,34 @@ pip install -r requirements.txt
 ./debux
 ```
 
-It talks to Ollama by default. For a local MLX or llama.cpp server, or a remote box:
+Point it at your weights once and it starts the model for you:
 
 ```
-./debux --api-base http://127.0.0.1:8080/v1 --model debux
-./debux "nginx is returning 502 since this morning"
+./debux --serve /path/to/debux-weights
 ```
+
+Save that in `~/.debux/config.json` and plain `./debux` is enough from then on:
+
+```json
+{ "model_path": "/path/to/debux-weights",
+  "system": "/path/to/system_prompt.txt" }
+```
+
+It reuses a server already listening on the port rather than loading a second copy, so the first
+start costs the model load (most of a minute for a 27B) and later ones are a few seconds.
+`--keep-server` leaves it up on exit; otherwise a server this client started is stopped with it.
+
+It also talks to Ollama, or to any OpenAI-compatible endpoint local or remote:
+
+```
+./debux --model qwen3.8:27b                                   # ollama
+./debux --api-base http://127.0.0.1:8080/v1 --model debux      # existing server
+./debux "nginx is returning 502 since this morning"            # problem up front
+```
+
+The system prompt has to match the weights - a model trained without the `PROCEDURE` directive
+will not reliably produce it - so set `system` alongside `model_path` rather than relying on the
+default.
 
 Paste freely. A paste arrives as a burst of lines and is submitted once the burst goes quiet, so
 there is nothing to remember - including at the first prompt, where people naturally paste the

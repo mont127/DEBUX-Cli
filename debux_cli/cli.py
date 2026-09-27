@@ -390,10 +390,36 @@ class Session:
 
 
 def build_backend(a, conf):
+    """Pick a backend, starting a local server when that is what the setup implies.
+
+    An explicit --api-base always wins. Otherwise, if weights are configured (--serve, or
+    model_path in ~/.debux/config.json, or DEBUX_MODEL_PATH), serve them - reusing whatever is
+    already on the port. Only fall back to ollama when no weights are known, since that is the
+    case where the user has genuinely chosen ollama.
+    """
     if a.api_base:
         return backends.OpenAICompat(a.model, a.api_base.rstrip("/"),
-                                     a.token or conf.get("token"))
-    return backends.Ollama(a.model, a.host)
+                                     a.token or conf.get("token")), None
+
+    weights = a.serve or os.environ.get("DEBUX_MODEL_PATH") or conf.get("model_path")
+    if weights and not a.no_serve:
+        srv = backends.LocalServer(weights, a.port)
+        print(f"{C.d}model: {weights}{C.r}")
+
+        def waiting(elapsed):
+            sys.stdout.write(f"\r{C.d}  loading... {int(elapsed)}s{C.r}")
+            sys.stdout.flush()
+
+        how, served = srv.start(log_path=os.path.join(HOME, "server.log"), on_wait=waiting)
+        sys.stdout.write("\r" + " " * 40 + "\r")
+        print(f"{C.gr}{'reusing the server already on' if how == 'reused' else 'started a server on'} "
+              f"port {a.port}{C.r}")
+        model_id = os.path.expanduser(weights)
+        if served and model_id not in served:
+            model_id = served[-1]        # the server names the model its own way
+        return backends.OpenAICompat(model_id, srv.base, None, label=f"local :{a.port}"), srv
+
+    return backends.Ollama(a.model, a.host), None
 
 
 def main(argv=None):
@@ -401,6 +427,13 @@ def main(argv=None):
     ap.add_argument("--model", default=os.environ.get("DEBUX_MODEL", "debux"))
     ap.add_argument("--host", default="http://127.0.0.1:11434", help="ollama host")
     ap.add_argument("--api-base", default=None, help="OpenAI-compatible base URL")
+    ap.add_argument("--serve", default=None, metavar="PATH",
+                    help="start a local model server on these weights and use it")
+    ap.add_argument("--port", type=int, default=8080, help="port for the local server")
+    ap.add_argument("--keep-server", action="store_true",
+                    help="leave the server running on exit so the next start is instant")
+    ap.add_argument("--no-serve", action="store_true",
+                    help="never start a server; use --api-base or ollama as given")
     ap.add_argument("--token", default=None)
     ap.add_argument("--system", default=None, help="path to a system prompt")
     ap.add_argument("--transcript", default=None, help="append the session to this jsonl file")
@@ -414,14 +447,24 @@ def main(argv=None):
     if a.no_color or not sys.stdout.isatty():
         C.off()
     conf = load_conf()
+    # The prompt has to match the weights: v1 was trained without the PROCEDURE directive, so
+    # serving v1 with the newer prompt degrades the format it was taught.
     try:
-        system = protocol.system_prompt(a.system)
+        system = protocol.system_prompt(a.system or conf.get("system"))
     except OSError as e:
         print(f"cannot read system prompt: {e}", file=sys.stderr)
         return 1
 
-    s = Session(build_backend(a, conf), system, a.transcript, a.no_search,
+    try:
+        backend, server = build_backend(a, conf)
+    except backends.BackendError as e:
+        print(f"{C.rd}{e}{C.r}", file=sys.stderr)
+        return 1
+    s = Session(backend, system, a.transcript, a.no_search,
                 auto_tools=not a.no_auto_tools)
+    if server and not a.keep_server:
+        import atexit
+        atexit.register(server.stop)
 
     print(f"{C.b}Debux{C.r}  {C.d}{s.backend.describe()}{C.r}")
     print(f"{C.d}Describe the problem. Paste command output when asked, ending with a lone '.'.")
