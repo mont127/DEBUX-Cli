@@ -16,6 +16,11 @@ import urllib.error
 import urllib.request
 
 
+# Servers commonly default to 512, which cuts a reasoning block plus a command list off
+# mid-word. A truncated reply loses its directive, so the client cannot act on it at all.
+MAX_TOKENS = 900
+
+
 class BackendError(Exception):
     pass
 

@@ -38,7 +38,20 @@ def sounds_unsure(text):
 # original symptom, and the last message only. A full transcript is a context shape it has never
 # seen, and it degrades accordingly. Keeping the symptom matters: without it a late turn loses
 # track of what is being debugged.
-WINDOW = 1
+# How much conversation the model sees. Training used a window of 1 - system prompt, the original
+# symptom, and the last message - because a 32 GB machine could not train on longer rows. Serving
+# it that way was a real defect: three turns into a session the model no longer knew the service
+# name it had just been given and asked for a unit that did not exist.
+#
+# Measured on that conversation: at window 1 it loses the name, at window 4 it keeps it and
+# continues correctly. The model generalises past its training window, so the client was throwing
+# context away for nothing.
+#
+# The symptom is always kept - it is what everything else is evidence about - and a character
+# budget bounds the rest, since pasted logs are large and a long session would otherwise grow
+# without limit.
+WINDOW = 8
+BUDGET = 24000
 
 
 def system_prompt(path=None):
@@ -47,11 +60,21 @@ def system_prompt(path=None):
         return fh.read().strip()
 
 
-def windowed(messages, window=WINDOW):
-    """system + original symptom + the last `window` messages."""
-    if window <= 0 or len(messages) <= 2 + window:
+def windowed(messages, window=WINDOW, budget=BUDGET):
+    """system + the original symptom + as much recent conversation as the budget allows."""
+    if len(messages) <= 2:
         return messages
-    return messages[:2] + messages[2:][-window:]
+    head, rest = messages[:2], messages[2:]
+    if window > 0:
+        rest = rest[-window:]
+
+    def size(msgs):
+        return sum(len(m.get("content") or "") for m in msgs)
+
+    # trim oldest-first, never dropping the symptom or the newest message
+    while len(rest) > 1 and size(head) + size(rest) > budget:
+        rest = rest[1:]
+    return head + rest
 
 
 def split(text):
